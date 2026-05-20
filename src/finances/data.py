@@ -1,7 +1,7 @@
 """Price fetching and portfolio enrichment from Yahoo Finance."""
 
+import logging
 import os
-import sys
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -11,9 +11,11 @@ from finances.common import (
     load_cache, save_cache, is_cache_valid,
 )
 
+logger = logging.getLogger(__name__)
 
-def _fetch_latest_price(isin: str) -> tuple[str, float | None, str]:
-    """Retrieve the most recent available price, asset name and type for an ISIN.
+
+def _fetch_latest_price(isin: str) -> tuple[str, float | None, float | None, str]:
+    """Retrieve the most recent price, previous close, asset name and type for an ISIN.
 
     Tries descending look-back periods (5d → 1mo → 3mo) to handle thinly-
     traded securities.
@@ -22,22 +24,32 @@ def _fetch_latest_price(isin: str) -> tuple[str, float | None, str]:
         isin: The ISIN identifier.
 
     Returns:
-        A ``(name, price, type)`` tuple. *price* is ``None`` if no data was found.
+        A ``(name, price, prev_close, asset_type)`` tuple. *price* and
+        *prev_close* are ``None`` if no data was found.
     """
     ticker = yf.Ticker(isin)
-    info = ticker.info
+    info = ticker.info or {}
     name = info.get("longName") or info.get("shortName") or isin
-    asset_class = ticker.funds_data.asset_classes
-    if asset_class:
-        type = 'Stock' if asset_class.get('stockPosition') > asset_class.get('bondPosition') else 'Bond'
-    else:
-        type = 'Other'
+
+    asset_type = "Other"
+    try:
+        fd = ticker.funds_data
+        ac = fd.asset_classes if fd else None
+        if ac:
+            asset_type = "Stock" if ac.get("stockPosition", 0) > ac.get("bondPosition", 0) else "Bond"
+    except Exception:
+        pass  # Not a fund — leave type as "Other"
+
     # Try increasing windows until we find trading data
+    prev_close = None
     for period in ("5d", "1mo", "3mo"):
         hist = ticker.history(period=period)
         if not hist.empty:
-            return name, float(hist["Close"].iloc[-1]), type
-    return name, None, type
+            price = float(hist["Close"].iloc[-1])
+            if len(hist) >= 2:
+                prev_close = float(hist["Close"].iloc[-2])
+            return name, price, prev_close, asset_type
+    return name, None, None, asset_type
 
 
 def resolve_prices(
@@ -53,7 +65,7 @@ def resolve_prices(
         force_refresh: If ``True``, skip the cache and fetch fresh prices.
 
     Returns:
-        Dict mapping ISIN → ``{"name": str, "price": float|None, "type": str, "timestamp": str}``.
+        Dict mapping ISIN → ``{"name": str, "price": float|None, "prev_close": float|None, "type": str, "timestamp": str}``.
     """
     cache = load_cache(config["cache"]["price"])
     prices = {}
@@ -63,14 +75,29 @@ def resolve_prices(
         # Use cached entry if still valid and refresh not forced
         if not force_refresh and isin in cache and is_cache_valid(cache[isin], price_ttl):
             prices[isin] = cache[isin]
+            # Backward compatibility: old cache entries may not have prev_close
+            if "prev_close" not in prices[isin]:
+                prices[isin]["prev_close"] = None
             continue
 
         try:
-            name, price, ptype = _fetch_latest_price(isin)
-            entry = {"name": name, "price": price, "type": ptype, "timestamp": datetime.now().isoformat()}
+            name, price, prev_close, asset_type = _fetch_latest_price(isin)
+            entry = {
+                "name": name,
+                "price": price,
+                "prev_close": prev_close,
+                "type": asset_type,
+                "timestamp": datetime.now().isoformat(),
+            }
         except Exception as error:
-            print(f"Warning: could not resolve {isin}: {error}", file=sys.stderr)
-            entry = {"name": f"Unknown ({isin})", "price": None, "type": None, "timestamp": datetime.now().isoformat()}
+            logger.warning("Could not resolve %s: %s", isin, error)
+            entry = {
+                "name": f"Unknown ({isin})",
+                "price": None,
+                "prev_close": None,
+                "type": None,
+                "timestamp": datetime.now().isoformat(),
+            }
 
         cache[isin] = entry
         prices[isin] = entry
@@ -80,7 +107,7 @@ def resolve_prices(
 
 
 def enrich_portfolio(portfolio: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """Enrich a portfolio DataFrame with name, type and current price.
+    """Enrich a portfolio DataFrame with name, type, current price and previous close.
 
     Resolves all ISINs via the yfinance price cache (TTL-gated) and merges
     the results into the portfolio.
@@ -91,20 +118,16 @@ def enrich_portfolio(portfolio: pd.DataFrame, config: dict) -> pd.DataFrame:
         config: Application configuration.
 
     Returns:
-        The same DataFrame with added columns: ``name``, ``type``, ``price``.
+        The same DataFrame with added columns: ``name``, ``type``, ``price``, ``prev_close``.
     """
     prices = resolve_prices(list(portfolio.index), config)
     price_df = pd.DataFrame.from_dict(prices, orient="index")
 
-    portfolio["name"] = portfolio.index.map(
-        lambda i: price_df.at[i, "name"] if i in price_df.index else i
-    )
-    portfolio["type"] = portfolio.index.map(
-        lambda i: price_df.at[i, "type"] if i in price_df.index else "Other"
-    )
-    portfolio["price"] = portfolio.index.map(
-        lambda i: price_df.at[i, "price"] if i in price_df.index else None
-    )
+    portfolio["name"] = price_df["name"].reindex(portfolio.index)
+    portfolio["name"] = portfolio["name"].fillna(portfolio.index.to_series())
+    portfolio["type"] = price_df["type"].reindex(portfolio.index).fillna("Other")
+    portfolio["price"] = price_df["price"].reindex(portfolio.index)
+    portfolio["prev_close"] = price_df["prev_close"].reindex(portfolio.index)
 
     return portfolio
 
@@ -165,8 +188,10 @@ def _fetch_historical(
         A ``pd.Series`` of per-share prices indexed by sample dates.
         Returns an empty Series named after the ISIN if no data is found.
     """
+    # yfinance treats end date as exclusive, so add one day to include it
+    end_plus = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     ticker = yf.Ticker(isin)
-    hist = ticker.history(start=start, end=end)
+    hist = ticker.history(start=start, end=end_plus)
     if hist.empty:
         return pd.Series(dtype=float, name=isin)
 
@@ -251,7 +276,7 @@ def fetch_historical_prices(
             price_series = _fetch_historical(isin, start, end)
             prices[isin] = price_series
         except Exception as error:
-            print(f"Warning: could not fetch historical data for {isin}: {error}", file=sys.stderr)
+            logger.warning("Could not fetch historical data for %s: %s", isin, error)
             prices[isin] = pd.Series(dtype=float, name=isin)
 
     # Fetch recent delta for stale ISINs, merge with existing data
@@ -263,7 +288,7 @@ def fetch_historical_prices(
             combined = combined[~combined.index.duplicated(keep="last")]
             prices[isin] = combined.sort_index()
         except Exception as error:
-            print(f"Warning: could not fetch delta for {isin}: {error}", file=sys.stderr)
+            logger.warning("Could not fetch delta for %s: %s", isin, error)
 
     # Fetch backward delta for ISINs whose cache starts too late, prepend
     for isin, (start, end) in to_fetch_backward.items():
@@ -274,7 +299,7 @@ def fetch_historical_prices(
             combined = combined[~combined.index.duplicated(keep="last")]
             prices[isin] = combined.sort_index()
         except Exception as error:
-            print(f"Warning: could not fetch backward data for {isin}: {error}", file=sys.stderr)
+            logger.warning("Could not fetch backward data for %s: %s", isin, error)
 
     # Persist to CSV cache (long format: date, isin, stock_price)
     cache_rows = {

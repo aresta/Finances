@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from finances.common import (
+    SHARE_EPS, VALUE_EPS,
     parse_orders, build_portfolio, build_cost_series,
     compute_cumulative_shares,
     format_pct, format_money, format_shares,
@@ -27,12 +28,100 @@ from finances.data import (
     fetch_historical_prices,
 )
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 DEFAULT_CONF_FILE = "finances.conf"
-CONFIG_FILE = DEFAULT_CONF_FILE
+TYPE_ORDER = {"Bond": 0, "Stock": 1, "Other": 2}
+TYPE_LABELS = {"Stock": "Stocks", "Bond": "Bonds"}
+MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+# Metric string constants
+METRIC_VALUE = "Value"
+METRIC_PNL = "P&L"
+METRIC_PNL_PCT = "P&L %"
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (pure functions, no Streamlit state)
+# ---------------------------------------------------------------------------
+
+
+def _parse_formatted_number(cell_value: str) -> float | None:
+    """Parse a formatted display string into a float.
+
+    Strips spaces, euro sign, percent sign, and leading plus.
+
+    Args:
+        cell_value: A formatted display string (e.g. ``"1 234 €"``, ``"12.5%"``).
+
+    Returns:
+        The parsed number, or ``None`` if parsing fails.
+    """
+    if cell_value is None or cell_value == "":
+        return None
+    try:
+        raw = (
+            cell_value.replace(" ", "").replace("\u20ac", "")
+            .replace("%", "").replace("+", "")
+        )
+        return float(raw)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _color_column(cell_value: str) -> str:
+    """Color positive values green and negative values red.
+
+    Args:
+        cell_value: A formatted display string.
+
+    Returns:
+        CSS color rule string or ``""`` if unparseable.
+    """
+    num = _parse_formatted_number(cell_value)
+    if num is None:
+        return ""
+    if num > 0:
+        return "color: green"
+    if num < 0:
+        return "color: red"
+    return ""
+
+
+def _color_type(val: str) -> str:
+    """Color asset-type labels: Bonds green, Stocks blue."""
+    if val == "Bond":
+        return "color: green; font-weight: 500;"
+    if val == "Stock":
+        return "color: #0066cc; font-weight: 500;"
+    return ""
+
+
+def _color_cell(cell: str) -> str:
+    """Color positive cells dark-green and negative cells red.
+
+    Args:
+        cell: A formatted return string (e.g. ``"3.5%"``).
+
+    Returns:
+        CSS color rule or ``""``.
+    """
+    num = _parse_formatted_number(cell)
+    if num is None:
+        return ""
+    if num > 0:
+        return "color: #008000;"
+    if num < 0:
+        return "color: #cc0000;"
+    return ""
+
 
 # ---------------------------------------------------------------------------
 # Entry point (for pipx console_script)
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Launch the Streamlit dashboard.
@@ -40,7 +129,6 @@ def main() -> None:
     When installed via pipx, ``finances`` invokes this function which
     bootstraps the Streamlit CLI with the current file as the target app.
     """
-
     from streamlit.web import cli as _stcli
 
     sys.argv = ["streamlit", "run", __file__] + sys.argv[1:]
@@ -48,26 +136,40 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config & page settings (run at module level — cheap, no side effects)
+# Config loading
 # ---------------------------------------------------------------------------
 
+
+def _load_config() -> dict:
+    """Load TOML configuration from the current working directory.
+
+    Checks for a ``.conf`` file in command-line arguments or the
+    ``FINANCES_CONFIG`` environment variable, falling back to the default.
+
+    Returns:
+        Parsed configuration dictionary.
+    """
+    config_file = os.environ.get("FINANCES_CONFIG", DEFAULT_CONF_FILE)
+    for arg in sys.argv[1:]:
+        if arg.endswith(".conf"):
+            config_file = arg
+            break
+    with open(config_file, "rb") as f:
+        return tomllib.load(f)
+
+
 # Copy default files to CWD if finances.conf not found (first run after install)
-if not os.path.exists("finances.conf"):
+if not os.path.exists(DEFAULT_CONF_FILE):
     _d = _res_files("defaults")
-    with open("finances.conf", "wb") as dst:
+    with open(DEFAULT_CONF_FILE, "wb") as dst:
         dst.write((_d / "finances.conf").read_bytes())
-    if not os.path.exists("ordres.csv"):
-        with open("ordres.csv", "wb") as dst:
-            dst.write((_d / "ordres.csv").read_bytes())
-        print("Created ordres.csv — replace with your own broker data.")
+    if not os.path.exists("orders.csv"):
+        with open("orders.csv", "wb") as dst:
+            dst.write((_d / "orders.csv").read_bytes())
+        print("Created orders.csv — replace with your own broker data.")
     print("Created finances.conf — edit it to match your broker format.")
 
-if len(sys.argv) == 2 and '.conf' in sys.argv[1]:
-    CONFIG_FILE = sys.argv[1]
-
-# Load TOML config from current working directory
-with open(CONFIG_FILE, "rb") as f:
-    config = tomllib.load(f)
+config = _load_config()
 st.set_page_config(layout="wide", page_title=config["general"]["title"])
 
 
@@ -87,14 +189,13 @@ def load_data() -> tuple:
     Returns:
         A tuple of ``(portfolio, orders, hist_prices)``.
     """
-    print('orders_file',config["input"]["orders_file"])
     # Parse broker orders → DataFrame
     orders = parse_orders(config["input"]["orders_file"], config)
 
     # Build portfolio with FIFO cost basis (one row per ISIN)
     portfolio = build_portfolio(orders)
 
-    # Enrich with name, type, current price from yfinance cache
+    # Enrich with name, type, current price and previous close from yfinance cache
     portfolio = enrich_portfolio(portfolio, config)
 
     # Fetch per-share historical prices at sample dates
@@ -115,7 +216,8 @@ def render() -> None:
     """Build and render the full dashboard UI."""
     portfolio, orders, hist_prices = load_data()
 
-    # Derived properties
+    # Derived properties — work on a copy to avoid mutating cached data
+    portfolio = portfolio.copy()
     portfolio["shares_held"] = portfolio["shares_bought"] - portfolio["shares_sold"]
 
     active_isins = list(portfolio[~portfolio["closed"]].sort_values(["type", "name"]).index)
@@ -134,7 +236,7 @@ def render() -> None:
             st.session_state[f"sel_{isin}"] = False
 
     if "metric" not in st.session_state:
-        st.session_state.metric = "Value"
+        st.session_state.metric = METRIC_VALUE
 
     # ---- Build unified date index ----
     all_dates = pd.DatetimeIndex(
@@ -155,19 +257,18 @@ def render() -> None:
     value_isins = [i for i in all_isins if i in shares_df.columns and i in price_df.columns]
     hist_df = pd.DataFrame(index=all_dates, columns=all_isins, dtype=float).fillna(0)
 
-
     for isin in value_isins:
         hist_df[isin] = (shares_df[isin] * price_df[isin]).round(6)
-    
+
     # FIFO cost basis and cumulative realized P&L per ISIN per date
     cost_df, realized_df = build_cost_series(orders, all_isins, all_dates)
 
-    # ---- Per-ISIN price anchors from hist_prices ----
-    last_hist = {}
+    # ---- Per-ISIN price anchors from historical data ----
+    # Previous close: from yfinance (via portfolio), for Day P&L %
+    # Month-start: from hist_prices, for Month P&L %
     month_start_hist = {}
     for isin, s in hist_prices.items():
         if not s.empty:
-            last_hist[isin] = float(s.iloc[-1])
             ms = s[s.index.day == 1]
             if not ms.empty:
                 month_start_hist[isin] = float(ms.iloc[-1])
@@ -208,12 +309,10 @@ def render() -> None:
             st.session_state[f"sel_{isin}"] = False
         st.rerun()
 
-    type_labels = {"Stock": "Stocks", "Bond": "Bonds"}
-
     # Group active ISINs by type for sidebar checkboxes
     active_port = portfolio.loc[active_isins].sort_values(["type", "name"])
     for ptype, group in active_port.groupby("type", sort=False):
-        label = type_labels.get(ptype, "Other")
+        label = TYPE_LABELS.get(ptype, "Other")
         st.sidebar.markdown(f"**{label}**")
         for isin in group.index:
             st.sidebar.checkbox(group.loc[isin, "name"], key=f"sel_{isin}")
@@ -252,9 +351,9 @@ def render() -> None:
 
     # ---- Reconcile metric across tab-specific radio buttons ----
     _METRIC_KEYS = ["metric_assets", "metric_allocation"]
-    metric = st.session_state.get("metric", "Value")
+    metric = st.session_state.get("metric", METRIC_VALUE)
     for key in _METRIC_KEYS:
-        val = st.session_state.get(key, "Value")
+        val = st.session_state.get(key, METRIC_VALUE)
         if val != metric:
             metric = val
             break
@@ -264,23 +363,15 @@ def render() -> None:
         st.session_state[key] = metric
 
     def _compute_metric_values(isin: str) -> pd.Series:
-        """Return the filtered value, P&L (total: unrealized + realized), or P&L % series for *isin*.
-
-        Args:
-            isin: The ISIN to compute metrics for.
-
-        Returns:
-            A ``pd.Series`` indexed by the filtered date range.
-        """
-        if st.session_state.metric == "Value":
+        """Return the filtered value, P&L, or P&L % series for *isin*."""
+        if st.session_state.metric == METRIC_VALUE:
             return hist_filtered[isin]
-        if st.session_state.metric == "P&L":
-            unrealized = hist_filtered[isin] - cost_filtered[isin]
-            return unrealized + realized_filtered[isin]
+        if st.session_state.metric == METRIC_PNL:
+            return hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
         # P&L %: total P&L / money_paid × 100
         total_pnl = hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
         money_paid = portfolio.at[isin, "money_paid"]
-        if money_paid:
+        if money_paid and money_paid != 0:
             return total_pnl / money_paid * 100
         return pd.Series(float("nan"), index=total_pnl.index)
 
@@ -339,18 +430,22 @@ def render() -> None:
                 # Active holding
                 current_price = row["price"]
                 market_value = shares_held * current_price if current_price else None
-                daily_pnl_pct = (
-                    (current_price - last_hist[isin]) / last_hist[isin] * 100
-                    if current_price and isin in last_hist else None
+                # Day P&L %: change vs previous closing price
+                prev_close = row["prev_close"] if "prev_close" in row.index else None
+                day_pnl_pct = (
+                    (current_price - prev_close) / prev_close * 100
+                    if current_price and prev_close and prev_close != 0 else None
                 )
-                monthly_pnl_pct = (
-                    (current_price - month_start_hist[isin]) / month_start_hist[isin] * 100
-                    if current_price and isin in month_start_hist else None
-                )
+                month_pnl_pct = None
+                if current_price and isin in month_start_hist:
+                    ms_val = month_start_hist[isin]
+                    if ms_val != 0:
+                        month_pnl_pct = (current_price - ms_val) / ms_val * 100
+
                 net_pnl = (market_value + row["money_received"]) - row["money_paid"] if market_value is not None else None
                 net_pnl_pct = (
                     (net_pnl / row["money_paid"] * 100)
-                    if row["money_paid"] and net_pnl is not None else None
+                    if row["money_paid"] and row["money_paid"] != 0 and net_pnl is not None else None
                 )
 
                 active_rows.append({
@@ -359,8 +454,8 @@ def render() -> None:
                     "ISIN": isin,
                     "Shares": format_shares(shares_held),
                     "Market Value": format_money(market_value),
-                    "Daily P&L %": format_pct(daily_pnl_pct),
-                    "Month P&L %": format_pct(monthly_pnl_pct),
+                    "Day P&L %": format_pct(day_pnl_pct),
+                    "Month P&L %": format_pct(month_pnl_pct),
                     "Net P&L": format_money(net_pnl),
                     "Net P&L %": format_pct(net_pnl_pct),
                 })
@@ -369,7 +464,7 @@ def render() -> None:
                 net_pnl = row["money_received"] - row["money_paid"]
                 net_pnl_pct = (
                     (net_pnl / row["money_paid"] * 100)
-                    if row["money_paid"] else None
+                    if row["money_paid"] and row["money_paid"] != 0 else None
                 )
 
                 closed_rows.append({
@@ -382,48 +477,13 @@ def render() -> None:
                     "P&L %": format_pct(net_pnl_pct),
                 })
 
-        def _color_column(cell_value: str) -> str:
-            """Color positive values green and negative values red.
-
-            Strips formatting (spaces, €, %) to parse the raw number.
-
-            Args:
-                cell_value: A formatted display string.
-
-            Returns:
-                CSS color rule string or ``""`` if unparseable.
-            """
-            if cell_value == "" or cell_value is None:
-                return ""
-            try:
-                raw_str = (
-                    cell_value.replace(" ", "").replace("\u20ac", "")
-                    .replace("%", "").replace("+", "")
-                )
-                num = float(raw_str)
-                return (
-                    "color: green" if num > 0
-                    else ("color: red" if num < 0 else "")
-                )
-            except (ValueError, AttributeError):
-                return ""
-
-        def _color_type(val: str) -> str:
-            if val == "Bond":
-                return "color: green; font-weight: 500;"
-            if val == "Stock":
-                return "color: #0066cc; font-weight: 500;"
-            return ""
-
         # Active holdings table
         active_df = pd.DataFrame(active_rows)
         if not active_df.empty:
-            # Sort: Bond group first, then Stock, then Other; alphabetical within
-            type_order = {"Bond": 0, "Stock": 1, "Other": 2}
-            active_df["_sort"] = active_df["Type"].map(type_order)
+            active_df["_sort"] = active_df["Type"].map(TYPE_ORDER)
             active_df = active_df.sort_values(["_sort", "Name"]).drop(columns=["_sort"])
 
-            pnl_cols = ["Daily P&L %", "Month P&L %", "Net P&L", "Net P&L %"]
+            pnl_cols = ["Day P&L %", "Month P&L %", "Net P&L", "Net P&L %"]
             styled = active_df.style \
                 .map(_color_column, subset=pnl_cols) \
                 .map(_color_type, subset=["Type"]) \
@@ -456,7 +516,7 @@ def render() -> None:
         else:
             bonds_pct = stocks_pct = 0.0
 
-        col_b, col_s, _,_ = st.columns(4)
+        col_b, col_s, _, _ = st.columns(4)
         with col_b:
             st.markdown(
                 f"<span style='color:green;font-size:1.3rem;font-weight:500'>"
@@ -478,9 +538,7 @@ def render() -> None:
         if closed_rows:
             st.markdown("### Closed positions")
             closed_df = pd.DataFrame(closed_rows)
-            # Sort same as active
-            type_order = {"Bond": 0, "Stock": 1, "Other": 2}
-            closed_df["_sort"] = closed_df["Type"].map(type_order)
+            closed_df["_sort"] = closed_df["Type"].map(TYPE_ORDER)
             closed_df = closed_df.sort_values(["_sort", "Name"]).drop(columns=["_sort"])
 
             styled_closed = closed_df.style \
@@ -499,7 +557,7 @@ def render() -> None:
     # ===== TAB 1: Assets — single-asset line chart =====
     with tabs[1]:
         ylabel = {
-            "Value": "Value (\u20ac)", "P&L": "P&L (\u20ac)", "P&L %": "P&L (%)",
+            METRIC_VALUE: "Value (\u20ac)", METRIC_PNL: "P&L (\u20ac)", METRIC_PNL_PCT: "P&L (%)",
         }[metric]
         show_total = st.session_state.get("show_total_assets", True)
 
@@ -516,9 +574,9 @@ def render() -> None:
         if selected_isins and show_total:
             sel_isins = [i for i in selected_isins if i in hist_filtered.columns]
             if sel_isins:
-                if metric == "Value":
+                if metric == METRIC_VALUE:
                     total_vals = hist_filtered[sel_isins].sum(axis=1)
-                elif metric == "P&L":
+                elif metric == METRIC_PNL:
                     total_vals = (
                         hist_filtered[sel_isins].sum(axis=1)
                         - cost_filtered[sel_isins].sum(axis=1)
@@ -531,7 +589,7 @@ def render() -> None:
                         - cost_filtered[sel_isins].sum(axis=1)
                         + realized_filtered[sel_isins].sum(axis=1)
                     )
-                    if total_paid:
+                    if total_paid and total_paid != 0:
                         total_vals = total_vals / total_paid * 100
                     else:
                         total_vals = pd.Series(float("nan"), index=total_vals.index)
@@ -543,11 +601,11 @@ def render() -> None:
         fig.update_layout(
             yaxis_title=ylabel, margin=dict(l=0, r=0, t=10, b=0), height=400,
         )
-        if st.session_state.metric == "P&L %":
+        if st.session_state.metric == METRIC_PNL_PCT:
             fig.update_layout(yaxis=dict(autorange=True))
         st.plotly_chart(fig, width="stretch")
 
-        st.radio("Metric", ["Value", "P&L", "P&L %"], key="metric_assets")
+        st.radio("Metric", [METRIC_VALUE, METRIC_PNL, METRIC_PNL_PCT], key="metric_assets")
         st.checkbox("Show Total", value=True, key="show_total_assets")
 
     # ===== TAB 2: Allocation — stacked area =====
@@ -555,24 +613,19 @@ def render() -> None:
         if selected_isins:
             sel_isins = [i for i in selected_isins if i in hist_filtered.columns]
             if sel_isins:
-                metric_mode = st.session_state.metric
-                if metric_mode == "P&L":
+                if metric == METRIC_PNL:
                     alloc_df = (
                         hist_filtered[sel_isins] - cost_filtered[sel_isins]
                         + realized_filtered[sel_isins]
                     ).copy()
-                    alloc_df.columns = [
-                        portfolio.at[i, "name"] if i in portfolio.index else i
-                        for i in sel_isins
-                    ]
                     y_label = "P&L (\u20ac)"
                 else:
                     alloc_df = hist_filtered[sel_isins].copy()
-                    alloc_df.columns = [
-                        portfolio.at[i, "name"] if i in portfolio.index else i
-                        for i in sel_isins
-                    ]
                     y_label = "Value (\u20ac)"
+                alloc_df.columns = [
+                    portfolio.at[i, "name"] if i in portfolio.index else i
+                    for i in sel_isins
+                ]
                 fig = px.area(
                     alloc_df, x=alloc_df.index, y=alloc_df.columns,
                     labels={"x": "", "value": y_label, "variable": "Asset"},
@@ -583,12 +636,12 @@ def render() -> None:
                     invested = cost_filtered[sel_isins].sum(axis=1)
                     fig.add_trace(go.Scatter(
                         x=invested.index, y=invested, mode="lines",
-                        name="Invested", line=dict(width=1.5,  dash="dot",color="#333333"),
+                        name="Invested", line=dict(width=1.5, dash="dot", color="#333333"),
                         hovertemplate="%{y:,.2f}",
                     ))
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
                 st.plotly_chart(fig, width="stretch")
-            st.radio("Metric", ["Value", "P&L"], key="metric_allocation")
+            st.radio("Metric", [METRIC_VALUE, METRIC_PNL], key="metric_allocation")
             st.checkbox("Invested", value=False, key="show_invested_allocation")
         else:
             st.info("Select at least one asset.")
@@ -610,7 +663,7 @@ def render() -> None:
 
                 # Convert to percentage of total value (always sums to 100 %)
                 total_val = type_data.sum(axis=1)
-                total_val = total_val.where(total_val > 1e-9, float("nan"))
+                total_val = total_val.where(total_val > VALUE_EPS, float("nan"))
                 type_data = type_data.div(total_val, axis=0) * 100
 
                 fig = px.area(
@@ -649,7 +702,7 @@ def render() -> None:
                     # reflected in month_start_vals for that same month.
                     net_invest = sel_orders[~sel_orders["is_first"]] \
                         .groupby("month_key")["amount"].sum()
-                    
+
                     prev = month_start_vals.iloc[:-1]
                     curr = month_start_vals.iloc[1:]
                     prev_periods = prev.index.to_period("M")
@@ -663,19 +716,8 @@ def render() -> None:
                         (curr.values - safe_adj.values) / safe_adj.values * 100,
                         index=prev.index,
                     ).fillna(0.0)
-
-                    return_abs = pd.Series(
-                        (curr.values - safe_adj.values) ,
-                        index=prev.index,
-                    ).fillna(0.0)                    
-
-                    return_abs = pd.Series(
-                        (curr.values - safe_adj.values),
-                        index=prev.index,
-                    ).fillna(0.0)
                 else:
                     return_pct = pd.Series(dtype=float)
-                    return_abs = pd.Series(dtype=float)
 
                 # Add synthetic first-month return when the first order month
                 # has no month-start entry (portfolio started at zero).
@@ -694,27 +736,16 @@ def render() -> None:
                                 (first_month_value - first_month_cash)
                                 / first_month_cash * 100
                             )
-                            first_return_abs = (
-                                first_month_value - first_month_cash
-                            )
                             synthetic_date = first_order_month.to_timestamp()
                             synthetic_pct = pd.Series(
                                 [first_return_pct], index=[synthetic_date]
                             )
-                            synthetic_abs = pd.Series(
-                                [first_return_abs], index=[synthetic_date]
-                            )
                             return_pct = pd.concat([synthetic_pct, return_pct])
-                            return_abs = pd.concat([synthetic_abs, return_abs])
 
                 if len(return_pct) == 0:
                     st.info("Not enough data for monthly returns.")
                 else:
                     # Pivot into year × month grid
-                    month_abbr = [
-                        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-                    ]
                     returns = pd.DataFrame({
                         "year": return_pct.index.year,
                         "month": return_pct.index.month,
@@ -723,7 +754,7 @@ def render() -> None:
                     pivot = returns.pivot(
                         index="year", columns="month", values="return_pct",
                     )
-                    pivot.columns = [month_abbr[m - 1] for m in pivot.columns]
+                    pivot.columns = [MONTH_ABBR[m - 1] for m in pivot.columns]
 
                     # YTD return: same cash-flow-adjusted formula as monthly but
                     # aggregated by year.  Year-start = earliest day-1 value in
@@ -783,28 +814,6 @@ def render() -> None:
                     )
                     display.index = display.index.astype(str)
                     display.index.name = None
-
-                    def _color_cell(cell: str) -> str:
-                        """Color positive cells dark-green and negative cells red.
-
-                        Args:
-                            cell: A formatted return string (e.g. ``"3.5%"``).
-
-                        Returns:
-                            CSS color rule or ``""``.
-                        """
-                        if not cell or cell == "":
-                            return ""
-                        try:
-                            raw = cell.replace("%", "").replace("+", "").strip()
-                            num = float(raw)
-                            if num > 0:
-                                return "color: #008000;"
-                            elif num < 0:
-                                return "color: #cc0000;"
-                            return ""
-                        except ValueError:
-                            return ""
 
                     styled = display.style.map(_color_cell) \
                         .set_properties(**{"text-align": "center"}) \

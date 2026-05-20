@@ -6,6 +6,10 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+# Epsilon constants for float comparisons
+SHARE_EPS = 1e-6
+VALUE_EPS = 1e-9
+
 
 def _match_sell(lots: list[list[float]], shares_to_sell: float) -> float:
     """Consume shares from the FIFO lot queue, returning the cost of sold shares.
@@ -22,9 +26,9 @@ def _match_sell(lots: list[list[float]], shares_to_sell: float) -> float:
     """
     cost_of_sold = 0.0
     remaining = shares_to_sell
-    while remaining > 1e-6 and lots:
+    while remaining > SHARE_EPS and lots:
         first_lot = lots[0]
-        if first_lot[0] <= remaining + 1e-6:
+        if first_lot[0] <= remaining + SHARE_EPS:
             remaining -= first_lot[0]
             cost_of_sold += first_lot[1]
             lots.pop(0)
@@ -35,6 +39,29 @@ def _match_sell(lots: list[list[float]], shares_to_sell: float) -> float:
             first_lot[1] -= cost_per_share * remaining
             remaining = 0
     return cost_of_sold
+
+
+def _make_converter(*, strip_currency: bool = False, decimal_separator: str = "."):
+    """Create a CSV column value converter for the given decimal format.
+
+    Handles European number format (comma as decimal separator) and optional
+    currency suffix stripping.
+
+    Args:
+        strip_currency: Whether to strip currency suffixes (" EUR", " €").
+        decimal_separator: The decimal separator character ("." or ",").
+
+    Returns:
+        A converter function suitable for ``pd.read_csv(converters=...)``.
+    """
+    def _convert(value: str) -> float:
+        value = value.strip()
+        if strip_currency:
+            value = value.replace(" EUR", "").replace(" €", "")
+        if decimal_separator == ",":
+            value = value.replace(".", "").replace(",", ".")
+        return float(value)
+    return _convert
 
 
 # ---------------------------------------------------------------------------
@@ -61,19 +88,8 @@ def parse_orders(path: str, config: dict) -> pd.DataFrame:
     dec_sep = col_conf["decimal_separator"]
     date_fmt = col_conf["date_format"]
 
-    # Converter for amount column: strip currency suffix, handle EU decimal
-    def _parse_amount(x):
-        x = x.strip().replace(" EUR", "").replace(" €", "")
-        if dec_sep == ",":
-            x = x.replace(".", "").replace(",", ".")
-        return float(x)
-
-    # Converter for shares column: handle EU decimal separator
-    def _parse_shares(x):
-        x = x.strip()
-        if dec_sep == ",":
-            x = x.replace(".", "").replace(",", ".")
-        return float(x)
+    _parse_amount = _make_converter(strip_currency=True, decimal_separator=dec_sep)
+    _parse_shares = _make_converter(strip_currency=False, decimal_separator=dec_sep)
 
     # Build the DataFrame
     df = pd.read_csv(
@@ -87,9 +103,9 @@ def parse_orders(path: str, config: dict) -> pd.DataFrame:
         },
     )
 
-    # indentify refund columns and switch to negative vals
+    # Identify refund columns and switch to negative vals
     subsc_colnum = col_conf.get("subsc")
-    if subsc_colnum and len(df.columns) > subsc_colnum:
+    if subsc_colnum is not None and len(df.columns) > subsc_colnum:
         amnt_col = df.columns[col_conf["amount"]]
         sh_col = df.columns[col_conf["shares"]]
         refund_pattern = 'refund|reembolso|neg'
@@ -174,7 +190,7 @@ def build_portfolio(orders: pd.DataFrame) -> pd.DataFrame:
 
     # Closed flag: no remaining shares
     portfolio["closed"] = (
-        (portfolio["shares_bought"] - portfolio["shares_sold"]).abs() < 1e-6
+        (portfolio["shares_bought"] - portfolio["shares_sold"]).abs() < SHARE_EPS
     )
 
     portfolio.index.name = "isin"
@@ -311,7 +327,7 @@ def load_cache(path: str) -> dict:
         The deserialised dictionary, or ``{}`` if the file does not exist.
     """
     if os.path.exists(path):
-        with open(path) as cache_file:
+        with open(path, encoding="utf-8") as cache_file:
             return json.load(cache_file)
     return {}
 
@@ -323,7 +339,7 @@ def save_cache(cache: dict, path: str) -> None:
         cache: The dictionary to serialise.
         path: Destination file path (overwritten if it exists).
     """
-    with open(path, "w") as cache_file:
+    with open(path, "w", encoding="utf-8") as cache_file:
         json.dump(cache, cache_file, indent=2)
 
 
@@ -347,17 +363,19 @@ def is_cache_valid(entry: dict, ttl: timedelta) -> bool:
 
 
 def format_pct(value: float | None) -> str:
-    """Format a percentage, dropping trailing zeros.
+    """Format a percentage with up to 2 decimals, dropping trailing zeros.
 
     Args:
-        value: Percentage value or ``None``.
+        value: Percentage value, ``None``, or ``NaN``.
 
     Returns:
-        String like ``"12.5%"``, or ``""`` for ``None``.
+        String like ``"12.34%"`` or ``"5.6%"``, or ``""`` for ``None``/``NaN``.
     """
     if value is None:
         return ""
-    formatted = f"{value:.1f}".rstrip("0").rstrip(".")
+    if isinstance(value, float) and value != value:  # NaN check
+        return ""
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
     return f"{formatted}%"
 
 
@@ -365,14 +383,16 @@ def format_money(value: float | None) -> str:
     """Format a EUR amount with thousands separator.
 
     Args:
-        value: EUR amount or ``None``.
+        value: EUR amount, ``None``, or ``NaN``.
 
     Returns:
-        String like ``"1 234 €"`` or ``"0.50 €"``, or ``""`` for ``None``.
+        String like ``"1 234 €"`` or ``"0.50 €"``, or ``""`` for ``None``/``NaN``.
     """
     if value is None:
         return ""
-    if abs(value) >= 1:
+    if isinstance(value, float) and value != value:  # NaN check
+        return ""
+    if abs(value) >= 1 or value == 0:
         return f"{int(round(value)):,}".replace(",", " ") + " €"
     return f"{value:,.2f}".replace(",", " ") + " €"
 
@@ -381,11 +401,13 @@ def format_shares(value: float | None) -> str:
     """Format a share count, dropping trailing zeros.
 
     Args:
-        value: Share count or ``None``.
+        value: Share count, ``None``, or ``NaN``.
 
     Returns:
-        String like ``"9.45"``, or ``""`` for ``None``.
+        String like ``"9.45"``, or ``""`` for ``None``/``NaN``.
     """
     if value is None:
+        return ""
+    if isinstance(value, float) and value != value:  # NaN check
         return ""
     return f"{value:.2f}".rstrip("0").rstrip(".")
