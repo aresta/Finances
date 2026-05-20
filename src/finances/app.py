@@ -251,7 +251,7 @@ def render() -> None:
     realized_filtered = realized_df.loc[date_mask]
 
     # ---- Reconcile metric across tab-specific radio buttons ----
-    _METRIC_KEYS = ["metric_assets", "metric_allocation", "metric_by_type"]
+    _METRIC_KEYS = ["metric_assets", "metric_allocation"]
     metric = st.session_state.get("metric", "Value")
     for key in _METRIC_KEYS:
         val = st.session_state.get(key, "Value")
@@ -578,9 +578,18 @@ def render() -> None:
                     labels={"x": "", "value": y_label, "variable": "Asset"},
                     color_discrete_sequence=px.colors.qualitative.Plotly,
                 )
+                # Overlay invested cost line if requested
+                if st.session_state.get("show_invested_allocation", False):
+                    invested = cost_filtered[sel_isins].sum(axis=1)
+                    fig.add_trace(go.Scatter(
+                        x=invested.index, y=invested, mode="lines",
+                        name="Invested", line=dict(width=1.5,  dash="dot",color="#333333"),
+                        hovertemplate="%{y:,.2f}",
+                    ))
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
                 st.plotly_chart(fig, width="stretch")
             st.radio("Metric", ["Value", "P&L"], key="metric_allocation")
+            st.checkbox("Invested", value=False, key="show_invested_allocation")
         else:
             st.info("Select at least one asset.")
 
@@ -595,43 +604,22 @@ def render() -> None:
                     type_isins.setdefault(t, []).append(isin)
 
             if type_isins:
-                metric_mode = st.session_state.metric
                 type_data = pd.DataFrame(index=hist_filtered.index)
-                if metric_mode == "P&L %":
-                    # Each type's absolute P&L contribution to total absolute P&L (%).
-                    # Using absolute values keeps all percentages in [0, 100]
-                    # so the stacked area chart sums to 100 % at every date.
-                    pnl_by_type = pd.DataFrame(index=hist_filtered.index)
-                    for atype, isins in type_isins.items():
-                        vals = hist_filtered[isins].sum(axis=1)
-                        costs = cost_filtered[isins].sum(axis=1)
-                        realized = realized_filtered[isins].sum(axis=1)
-                        pnl_by_type[atype] = vals - costs + realized
-                    abs_pnl = pnl_by_type.abs()
-                    total_abs = abs_pnl.sum(axis=1)
-                    total_abs = total_abs.where(total_abs > 1e-9, float("nan"))
-                    type_data = abs_pnl.div(total_abs, axis=0) * 100
-                    y_label = "P&L contribution (%)"
-                elif metric_mode == "P&L":
-                    for atype, isins in type_isins.items():
-                        type_data[atype] = (
-                            hist_filtered[isins] - cost_filtered[isins]
-                            + realized_filtered[isins]
-                        ).sum(axis=1)
-                    y_label = "P&L (\u20ac)"
-                else:
-                    for atype, isins in type_isins.items():
-                        type_data[atype] = hist_filtered[isins].sum(axis=1)
-                    y_label = "Value (\u20ac)"
+                for atype, isins in type_isins.items():
+                    type_data[atype] = hist_filtered[isins].sum(axis=1)
+
+                # Convert to percentage of total value (always sums to 100 %)
+                total_val = type_data.sum(axis=1)
+                total_val = total_val.where(total_val > 1e-9, float("nan"))
+                type_data = type_data.div(total_val, axis=0) * 100
 
                 fig = px.area(
                     type_data, x=type_data.index, y=type_data.columns,
-                    labels={"x": "", "value": y_label, "variable": "Type"},
+                    labels={"x": "", "value": "Portfolio %", "variable": "Type"},
                     color_discrete_sequence=px.colors.qualitative.Plotly,
                 )
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
                 st.plotly_chart(fig, width="stretch")
-            st.radio("Metric", ["Value", "P&L", "P&L %"], key="metric_by_type")
         else:
             st.info("Select at least one asset.")
 
