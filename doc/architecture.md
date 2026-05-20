@@ -187,7 +187,7 @@ The Streamlit UI renders 5 tabs:
 |---|---|
 | **Overview** | Portfolio value, cost, P&L and P&L% metric cards; Bonds/Stocks allocation breakdown (% and value, color-coded green/blue); active holdings table with daily/monthly/net P&L per ISIN (total P&L = market_value + money_received − money_paid); closed positions table |
 | **Assets** | Per-asset historical line charts (Plotly) for value, P&L, or P&L% over time. Optional total overlay line. Metric selector and "Show Total" checkbox. |
-| **Allocation** | Stacked area chart (Plotly) showing value or P&L time-series per asset. With "P&L %" metric, shows percentile allocation over time. |
+| **Allocation** | Stacked area chart (Plotly) showing value or P&L time-series per asset. |
 | **By Type** | Stacked area chart (Plotly) aggregating value/cost/P&L by asset type (Stock, Bond, Other). With "P&L %" metric, shows percentile P&L per type over time. |
 | **Monthly Returns** | Year × month grid table (styled HTML) with color-coded cells (green for positive, red for negative returns). Cash-flow-adjusted month-over-month return percentages, plus a YTD column. When the first month with orders has no prior month-start value, a synthetic first-month return is computed from zero starting value and all orders in that first month. |
 

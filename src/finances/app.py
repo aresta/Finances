@@ -566,23 +566,6 @@ def render() -> None:
                         for i in sel_isins
                     ]
                     y_label = "P&L (\u20ac)"
-                elif metric_mode == "P&L %":
-                    # Each asset's absolute P&L contribution to total absolute P&L (%).
-                    # Using absolute values keeps all percentages in [0, 100]
-                    # so the stacked area chart sums to 100 % at every date.
-                    pnl_df = (
-                        hist_filtered[sel_isins] - cost_filtered[sel_isins]
-                        + realized_filtered[sel_isins]
-                    )
-                    abs_pnl = pnl_df.abs()
-                    total_abs = abs_pnl.sum(axis=1)
-                    total_abs = total_abs.where(total_abs > 1e-9, float("nan"))
-                    alloc_df = abs_pnl.div(total_abs, axis=0) * 100
-                    alloc_df.columns = [
-                        portfolio.at[i, "name"] if i in portfolio.index else i
-                        for i in sel_isins
-                    ]
-                    y_label = "P&L contribution (%)"
                 else:
                     alloc_df = hist_filtered[sel_isins].copy()
                     alloc_df.columns = [
@@ -597,7 +580,7 @@ def render() -> None:
                 )
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
                 st.plotly_chart(fig, width="stretch")
-            st.radio("Metric", ["Value", "P&L", "P&L %"], key="metric_allocation")
+            st.radio("Metric", ["Value", "P&L"], key="metric_allocation")
         else:
             st.info("Select at least one asset.")
 
