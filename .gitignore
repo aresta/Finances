@@ -1,0 +1,17 @@
+dist/
+*.egg-info/
+build/
+.venv/
+.price_cache.json
+.historical_cache.csv
+*.ipynb
+.ipynb_checkpoints/
+**/__init__.py
+**/__main__.py
+__pycache__/
+agents.md
+*.csv
+*.conf
+!src/defaults/orders.csv
+!src/defaults/finances.conf
+**test**

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finances"
+version = "0.5.0"
+description = "Personal investment portfolio tracker with interactive dashboard"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "streamlit>=1.50",
+    "pandas>=2.0",
+    "plotly>=5.20",
+    "yfinance>=0.2",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+finances = "finances.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["finances", "defaults"]
+
+[tool.setuptools.package-data]
+finances = ["*.conf"]
+defaults = ["*"]
