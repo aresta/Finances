@@ -361,13 +361,11 @@ def render() -> None:
     # ---- Reconcile metric across tab-specific radio buttons ----
     # Syncs a shared metric value so that changing the radio in one tab
     # updates the other tab's radio too.  P&L % is only available in the
-    # Assets tab; the Allocation tab does not offer it, so it is never
-    # written to the allocation key to avoid Streamlit resetting it.
+    # Assets tab; the Allocation tab radio only offers Value / P&L, so
+    # P&L % is mapped to P&L for the allocation key.
     _METRIC_KEYS = ["metric_assets", "metric_allocation"]
     metric = st.session_state.get("metric", METRIC_VALUE)
     for key in _METRIC_KEYS:
-        if metric == METRIC_PNL_PCT and key == "metric_allocation":
-            continue  # Allocation tab radio does not include P&L %
         val = st.session_state.get(key, METRIC_VALUE)
         if val != metric:
             metric = val
@@ -375,9 +373,8 @@ def render() -> None:
 
     st.session_state.metric = metric
     for key in _METRIC_KEYS:
-        if metric == METRIC_PNL_PCT and key == "metric_allocation":
-            continue  # Allocation tab radio does not include P&L %
-        st.session_state[key] = metric
+        # Allocation tab radio does not include P&L %; map it to P&L
+        st.session_state[key] = METRIC_PNL if metric == METRIC_PNL_PCT and key == "metric_allocation" else metric
 
     def _compute_metric_values(isin: str) -> pd.Series:
         """Return the filtered value, P&L, or P&L % series for *isin*."""
@@ -612,7 +609,7 @@ def render() -> None:
         )
         if st.session_state.metric == METRIC_PNL_PCT:
             fig.update_layout(yaxis=dict(autorange=True))
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch", key=f"assets_chart_{metric}")
 
         st.radio("Metric", [METRIC_VALUE, METRIC_PNL, METRIC_PNL_PCT], key="metric_assets")
         st.checkbox("Show Total", value=False, key="show_total_assets")
@@ -620,7 +617,7 @@ def render() -> None:
     # ===== TAB 2: Allocation — stacked area =====
     with tabs[2]:
         if sel_hist_isins:
-            if metric == METRIC_PNL:
+            if metric in (METRIC_PNL, METRIC_PNL_PCT):
                 alloc_df = (
                     hist_filtered[sel_hist_isins] - cost_filtered[sel_hist_isins]
                     + realized_filtered[sel_hist_isins]
@@ -647,7 +644,7 @@ def render() -> None:
                     hovertemplate="%{y:,.2f}",
                 ))
             fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, width="stretch", key=f"alloc_chart_{metric}")
             st.radio("Metric", [METRIC_VALUE, METRIC_PNL], key="metric_allocation")
             st.checkbox("Invested", value=False, key="show_invested_allocation")
         else:

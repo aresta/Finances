@@ -184,7 +184,13 @@ The Streamlit UI renders 5 tabs:
 |---|---|
 | **Overview** | Portfolio value, cost, P&L and P&L% metric cards; Bonds/Stocks allocation breakdown (% and value, color-coded green/blue); active holdings table with Day Change % (vs previous close), Month P&L % (vs month-start), and net P&L per ISIN; closed positions table |
 | **Assets** | Per-asset historical line charts (Plotly) for value, P&L, or P&L% over time. Optional total overlay line. Metric selector and "Show Total" checkbox. |
-| **Allocation** | Stacked area chart (Plotly) showing value or P&L time-series per asset. |
+| **Allocation** | Stacked area chart (Plotly) showing value or P&L time-series per asset. When the metric is P&L% (set from the Assets tab), P&L data is shown since the allocation chart does not support percentage mode. |
+
+All chart elements use metric-dependent keys (`f"assets_chart_{metric}"`, `f"alloc_chart_{metric}"`) to ensure Streamlit fully re-renders the chart when the metric changes, avoiding stale-data display issues with incremental Plotly updates.
+
+### Metric synchronization
+
+The Assets and Allocation tabs share a metric state via `st.session_state.metric_assets` and `metric_allocation`. A reconciliation loop at the top of `render()` detects any tab-specific radio change and propagates it to the shared `metric` key and across both tabs. P&L% is only available in the Assets tab; when selected, the Allocation tab radio is mapped to P&L (its closest equivalent).
 | **By Type** | Stacked area chart (Plotly) showing percentage of total portfolio value by asset type (Stock, Bond, Other). Always sums to 100 %. |
 | **Monthly Returns** | Year × month grid table (styled HTML) with color-coded cells (green for positive, red for negative returns). Cash-flow-adjusted month-over-month return percentages, plus a YTD column. When the first month with orders has no prior month-start value, a synthetic first-month return is computed from zero starting value and all orders in that first month. |
 
