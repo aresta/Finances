@@ -392,7 +392,7 @@ def format_money(value: float | None) -> str:
         return ""
     if isinstance(value, float) and value != value:  # NaN check
         return ""
-    if abs(value) >= 1 or value == 0:
+    if abs(value) >= 100 or value == 0:
         return f"{int(round(value)):,}".replace(",", " ") + " €"
     return f"{value:,.2f}".replace(",", " ") + " €"
 

@@ -458,12 +458,24 @@ def render() -> None:
                     if row["money_paid"] and row["money_paid"] != 0 and net_pnl is not None else None
                 )
 
+                # Shares tooltip: current price per share
+                shares_display = (
+                    f'<span title="{format_money(current_price)}/share">{format_shares(shares_held)}</span>'
+                    if current_price is not None else format_shares(shares_held)
+                )
+                # Market Value tooltip: money invested (money_paid)
+                invested_tip = f"{format_money(row['money_paid'])} invested"
+                mv_display = (
+                    f'<span title="{invested_tip}">{format_money(market_value)}</span>'
+                    if market_value is not None else ""
+                )
+
                 active_rows.append({
                     "Type": row["type"] or "Other",
                     "Name": row["name"],
                     "ISIN": isin,
-                    "Shares": format_shares(shares_held),
-                    "Market Value": format_money(market_value),
+                    "Shares": shares_display,
+                    "Market Value": mv_display,
                     "Day P&L %": format_pct(day_pnl_pct),
                     "Month P&L %": format_pct(month_pnl_pct),
                     "Net P&L": format_money(net_pnl),
@@ -495,6 +507,8 @@ def render() -> None:
 
             pnl_cols = ["Day P&L %", "Month P&L %", "Net P&L", "Net P&L %"]
             styled = active_df.style \
+                .hide(axis="index") \
+                .format(escape=None, subset=["Shares", "Market Value"]) \
                 .map(_color_column, subset=pnl_cols) \
                 .map(_color_type, subset=["Type"]) \
                 .set_properties(
@@ -504,8 +518,17 @@ def render() -> None:
                 .set_properties(
                     **{"text-align": "left"},
                     subset=["Type", "Name", "ISIN"],
-                )
-            st.dataframe(styled, hide_index=True)
+                ) \
+                .set_table_styles([
+                    {"selector": "th", "props": [
+                        ("font-weight", "600"), ("border-bottom", "2px solid #ddd"),
+                        ("padding", "6px 10px"),
+                    ]},
+                    {"selector": "td", "props": [
+                        ("border-bottom", "1px solid #eee"), ("padding", "4px 10px"),
+                    ]},
+                ])
+            st.markdown(styled.to_html(), unsafe_allow_html=True)
         elif not closed_rows:
             st.info("Select at least one asset.")
 
@@ -552,6 +575,7 @@ def render() -> None:
             closed_df = closed_df.sort_values(["_sort", "Name"]).drop(columns=["_sort"])
 
             styled_closed = closed_df.style \
+                .hide(axis="index") \
                 .map(_color_column, subset=["P&L", "P&L %"]) \
                 .map(_color_type, subset=["Type"]) \
                 .set_properties(
@@ -561,8 +585,17 @@ def render() -> None:
                 .set_properties(
                     **{"text-align": "left"},
                     subset=["Type", "Name", "ISIN"],
-                )
-            st.dataframe(styled_closed, hide_index=True)
+                ) \
+                .set_table_styles([
+                    {"selector": "th", "props": [
+                        ("font-weight", "600"), ("border-bottom", "2px solid #ddd"),
+                        ("padding", "6px 10px"),
+                    ]},
+                    {"selector": "td", "props": [
+                        ("border-bottom", "1px solid #eee"), ("padding", "4px 10px"),
+                    ]},
+                ])
+            st.markdown(styled_closed.to_html(), unsafe_allow_html=True)
 
     # ===== TAB 1: Assets — single-asset line chart =====
     with tabs[1]:
