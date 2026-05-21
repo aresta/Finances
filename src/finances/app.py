@@ -255,10 +255,10 @@ def render() -> None:
 
     # Portfolio value: shares × stock_price
     value_isins = [i for i in all_isins if i in shares_df.columns and i in price_df.columns]
-    hist_df = pd.DataFrame(index=all_dates, columns=all_isins, dtype=float).fillna(0)
+    portf_hist_df = pd.DataFrame(index=all_dates, columns=all_isins, dtype=float).fillna(0)
 
     for isin in value_isins:
-        hist_df[isin] = (shares_df[isin] * price_df[isin]).round(6)
+        portf_hist_df[isin] = (shares_df[isin] * price_df[isin]).round(6)
 
     # FIFO cost basis and cumulative realized P&L per ISIN per date
     cost_df, realized_df = build_cost_series(orders, all_isins, all_dates)
@@ -290,10 +290,10 @@ def render() -> None:
         index=0, label_visibility="collapsed",
     )
     if range_options[chosen_range] is None:
-        date_range = (hist_df.index.min(), hist_df.index.max())
+        date_range = (portf_hist_df.index.min(), portf_hist_df.index.max())
     else:
-        range_start = max(range_options[chosen_range], hist_df.index.min())
-        date_range = (range_start, hist_df.index.max())
+        range_start = max(range_options[chosen_range], portf_hist_df.index.min())
+        date_range = (range_start, portf_hist_df.index.max())
 
     # ---- Sidebar: asset checkboxes (grouped by type) ----
     st.sidebar.markdown("---")
@@ -335,24 +335,39 @@ def render() -> None:
     # Clamp date-range start to the first date with any portfolio data
     # for the selected assets, so charts don't show months of zeros
     if selected_isins:
-        sel_isins = [i for i in selected_isins if i in hist_df.columns]
+        sel_isins = [i for i in selected_isins if i in portf_hist_df.columns]
         if sel_isins:
-            first_val_date = hist_df[sel_isins].sum(axis=1)
+            first_val_date = portf_hist_df[sel_isins].sum(axis=1)
             first_val_date = first_val_date[first_val_date > 0].index
             if len(first_val_date) > 0:
                 start_idx = first_val_date[0]
                 date_range = (max(date_range[0], start_idx), date_range[1])
 
     # ---- Apply date-range filter to DataFrames ----
-    date_mask = (hist_df.index >= date_range[0]) & (hist_df.index <= date_range[1])
-    hist_filtered = hist_df.loc[date_mask]
+    date_mask = (portf_hist_df.index >= date_range[0]) & (portf_hist_df.index <= date_range[1])
+    hist_filtered = portf_hist_df.loc[date_mask]
     cost_filtered = cost_df.loc[date_mask]
     realized_filtered = realized_df.loc[date_mask]
 
+    # Selected ISINs present in the filtered historical data — used by tabs 1/2/4
+    sel_hist_isins = [i for i in selected_isins if i in hist_filtered.columns]
+
+    # Active (non-closed) selected ISINs — used by Tab 0 (Overview)
+    active_sel = [
+        i for i in selected_isins
+        if i in portfolio.index and not portfolio.at[i, "closed"]
+    ]
+
     # ---- Reconcile metric across tab-specific radio buttons ----
+    # Syncs a shared metric value so that changing the radio in one tab
+    # updates the other tab's radio too.  P&L % is only available in the
+    # Assets tab; the Allocation tab does not offer it, so it is never
+    # written to the allocation key to avoid Streamlit resetting it.
     _METRIC_KEYS = ["metric_assets", "metric_allocation"]
     metric = st.session_state.get("metric", METRIC_VALUE)
     for key in _METRIC_KEYS:
+        if metric == METRIC_PNL_PCT and key == "metric_allocation":
+            continue  # Allocation tab radio does not include P&L %
         val = st.session_state.get(key, METRIC_VALUE)
         if val != metric:
             metric = val
@@ -360,6 +375,8 @@ def render() -> None:
 
     st.session_state.metric = metric
     for key in _METRIC_KEYS:
+        if metric == METRIC_PNL_PCT and key == "metric_allocation":
+            continue  # Allocation tab radio does not include P&L %
         st.session_state[key] = metric
 
     def _compute_metric_values(isin: str) -> pd.Series:
@@ -384,10 +401,6 @@ def render() -> None:
     with tabs[0]:
         if selected_isins:
             # Summary metrics (active positions only)
-            active_sel = [
-                i for i in selected_isins
-                if i in portfolio.index and not portfolio.at[i, "closed"]
-            ]
             if active_sel:
                 latest_value = sum(
                     portfolio.at[i, "shares_held"] * portfolio.at[i, "price"]
@@ -559,41 +572,37 @@ def render() -> None:
         ylabel = {
             METRIC_VALUE: "Value (\u20ac)", METRIC_PNL: "P&L (\u20ac)", METRIC_PNL_PCT: "P&L (%)",
         }[metric]
-        show_total = st.session_state.get("show_total_assets", True)
+        show_total = st.session_state.get("show_total_assets", False)
 
         fig = go.Figure()
-        for isin in selected_isins:
-            if isin not in hist_filtered.columns:
-                continue
+        for isin in sel_hist_isins:
             fig.add_trace(go.Scatter(
                 x=hist_filtered.index, y=_compute_metric_values(isin),
                 mode="lines", name=portfolio.at[isin, "name"] if isin in portfolio.index else isin,
                 hovertemplate="%{y:,.2f}",
             ))
         # Overlay a total line (dashed black) if requested
-        if selected_isins and show_total:
-            sel_isins = [i for i in selected_isins if i in hist_filtered.columns]
-            if sel_isins:
-                if metric == METRIC_VALUE:
-                    total_vals = hist_filtered[sel_isins].sum(axis=1)
-                elif metric == METRIC_PNL:
-                    total_vals = (
-                        hist_filtered[sel_isins].sum(axis=1)
-                        - cost_filtered[sel_isins].sum(axis=1)
-                        + realized_filtered[sel_isins].sum(axis=1)
-                    )
+        if sel_hist_isins and show_total:
+            if metric == METRIC_VALUE:
+                total_vals = hist_filtered[sel_hist_isins].sum(axis=1)
+            elif metric == METRIC_PNL:
+                total_vals = (
+                    hist_filtered[sel_hist_isins].sum(axis=1)
+                    - cost_filtered[sel_hist_isins].sum(axis=1)
+                    + realized_filtered[sel_hist_isins].sum(axis=1)
+                )
+            else:
+                total_paid = sum(portfolio.at[i, "money_paid"] for i in sel_hist_isins)
+                total_vals = (
+                    hist_filtered[sel_hist_isins].sum(axis=1)
+                    - cost_filtered[sel_hist_isins].sum(axis=1)
+                    + realized_filtered[sel_hist_isins].sum(axis=1)
+                )
+                if total_paid and total_paid != 0:
+                    total_vals = total_vals / total_paid * 100
                 else:
-                    total_paid = sum(portfolio.at[i, "money_paid"] for i in sel_isins)
-                    total_vals = (
-                        hist_filtered[sel_isins].sum(axis=1)
-                        - cost_filtered[sel_isins].sum(axis=1)
-                        + realized_filtered[sel_isins].sum(axis=1)
-                    )
-                    if total_paid and total_paid != 0:
-                        total_vals = total_vals / total_paid * 100
-                    else:
-                        total_vals = pd.Series(float("nan"), index=total_vals.index)
-                fig.add_trace(go.Scatter(
+                    total_vals = pd.Series(float("nan"), index=total_vals.index)
+            fig.add_trace(go.Scatter(
                     x=hist_filtered.index, y=total_vals, mode="lines",
                     name="Total", line=dict(width=3, dash="dot", color="black"),
                     hovertemplate="%{y:,.2f}",
@@ -606,41 +615,39 @@ def render() -> None:
         st.plotly_chart(fig, width="stretch")
 
         st.radio("Metric", [METRIC_VALUE, METRIC_PNL, METRIC_PNL_PCT], key="metric_assets")
-        st.checkbox("Show Total", value=True, key="show_total_assets")
+        st.checkbox("Show Total", value=False, key="show_total_assets")
 
     # ===== TAB 2: Allocation — stacked area =====
     with tabs[2]:
-        if selected_isins:
-            sel_isins = [i for i in selected_isins if i in hist_filtered.columns]
-            if sel_isins:
-                if metric == METRIC_PNL:
-                    alloc_df = (
-                        hist_filtered[sel_isins] - cost_filtered[sel_isins]
-                        + realized_filtered[sel_isins]
-                    ).copy()
-                    y_label = "P&L (\u20ac)"
-                else:
-                    alloc_df = hist_filtered[sel_isins].copy()
-                    y_label = "Value (\u20ac)"
-                alloc_df.columns = [
-                    portfolio.at[i, "name"] if i in portfolio.index else i
-                    for i in sel_isins
-                ]
-                fig = px.area(
-                    alloc_df, x=alloc_df.index, y=alloc_df.columns,
-                    labels={"x": "", "value": y_label, "variable": "Asset"},
-                    color_discrete_sequence=px.colors.qualitative.Plotly,
-                )
-                # Overlay invested cost line if requested
-                if st.session_state.get("show_invested_allocation", False):
-                    invested = cost_filtered[sel_isins].sum(axis=1)
-                    fig.add_trace(go.Scatter(
-                        x=invested.index, y=invested, mode="lines",
-                        name="Invested", line=dict(width=1.5, dash="dot", color="#333333"),
-                        hovertemplate="%{y:,.2f}",
-                    ))
-                fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
-                st.plotly_chart(fig, width="stretch")
+        if sel_hist_isins:
+            if metric == METRIC_PNL:
+                alloc_df = (
+                    hist_filtered[sel_hist_isins] - cost_filtered[sel_hist_isins]
+                    + realized_filtered[sel_hist_isins]
+                ).copy()
+                y_label = "P&L (\u20ac)"
+            else:
+                alloc_df = hist_filtered[sel_hist_isins].copy()
+                y_label = "Value (\u20ac)"
+            alloc_df.columns = [
+                portfolio.at[i, "name"] if i in portfolio.index else i
+                for i in sel_hist_isins
+            ]
+            fig = px.area(
+                alloc_df, x=alloc_df.index, y=alloc_df.columns,
+                labels={"x": "", "value": y_label, "variable": "Asset"},
+                color_discrete_sequence=px.colors.qualitative.Plotly,
+            )
+            # Overlay invested cost line if requested
+            if st.session_state.get("show_invested_allocation", False):
+                invested = cost_filtered[sel_hist_isins].sum(axis=1)
+                fig.add_trace(go.Scatter(
+                    x=invested.index, y=invested, mode="lines",
+                    name="Invested", line=dict(width=1.5, dash="dot", color="#333333"),
+                    hovertemplate="%{y:,.2f}",
+                ))
+            fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
+            st.plotly_chart(fig, width="stretch")
             st.radio("Metric", [METRIC_VALUE, METRIC_PNL], key="metric_allocation")
             st.checkbox("Invested", value=False, key="show_invested_allocation")
         else:
@@ -678,173 +685,171 @@ def render() -> None:
 
     # ===== TAB 4: Monthly Returns — year × month heatmap-style grid =====
     with tabs[4]:
-        if selected_isins:
-            sel_isins = [i for i in selected_isins if i in hist_df.columns]
-            if not sel_isins:
-                st.info("Select at least one asset.")
-            else:
-                # Total portfolio value at all dates; trim leading zeros
-                total_values = hist_df[sel_isins].sum(axis=1)
-                if (total_values > 0).any():
-                    total_values = total_values.loc[(total_values > 0).idxmax():]
-                month_start_vals = total_values[total_values.index.day == 1]
+        if sel_hist_isins:
+            # Total portfolio value at all dates; trim leading zeros
+            total_values = portf_hist_df[sel_hist_isins].sum(axis=1)
+            if (total_values > 0).any():
+                total_values = total_values.loc[(total_values > 0).idxmax():]
+            month_start_vals = total_values[total_values.index.day == 1]
 
-                # Prepare order data (needed for both regular and synthetic returns)
-                orders_m = orders.assign(
-                    month_key=orders["date"].dt.to_period("M"),
-                    is_first=orders["date"].dt.day == 1,
+            # Prepare order data (needed for both regular and synthetic returns)
+            orders_m = orders.assign(
+                month_key=orders["date"].dt.to_period("M"),
+                is_first=orders["date"].dt.day == 1,
+            )
+            sel_orders = orders_m[orders_m["isin"].isin(selected_isins)]
+
+            # Compute regular month-over-month returns
+            if len(month_start_vals) >= 2:
+                # Exclude orders on the 1st of the month: they are already
+                # reflected in month_start_vals for that same month.
+                net_invest = sel_orders[~sel_orders["is_first"]] \
+                    .groupby("month_key")["amount"].sum()
+
+                prev = month_start_vals.iloc[:-1]
+                curr = month_start_vals.iloc[1:]
+                prev_periods = prev.index.to_period("M")
+                cash = pd.Series(
+                    [net_invest.get(p, 0.0) for p in prev_periods],
+                    index=prev.index,
                 )
-                sel_orders = orders_m[orders_m["isin"].isin(selected_isins)]
+                adj_prev = prev + cash
+                safe_adj = adj_prev.replace(0, float("nan"))
+                return_pct = pd.Series(
+                    (curr.values - safe_adj.values) / safe_adj.values * 100,
+                    index=prev.index,
+                ).fillna(0.0)
+            else:
+                return_pct = pd.Series(dtype=float)
 
-                # Compute regular month-over-month returns
-                if len(month_start_vals) >= 2:
-                    # Exclude orders on the 1st of the month: they are already
-                    # reflected in month_start_vals for that same month.
-                    net_invest = sel_orders[~sel_orders["is_first"]] \
-                        .groupby("month_key")["amount"].sum()
+            # Add synthetic first-month return when the first order month
+            # has no month-start entry (portfolio started at zero).
+            if len(month_start_vals) > 0 and len(sel_orders) > 0:
+                first_order_month = sel_orders["date"].min().to_period("M")
+                first_ms_month = month_start_vals.index[0].to_period("M")
+                if first_ms_month > first_order_month:
+                    # Starting value was zero; include ALL orders in the
+                    # first month (even those on the 1st).
+                    first_month_cash = sel_orders[
+                        sel_orders["month_key"] == first_order_month
+                    ]["amount"].sum()
+                    first_month_value = month_start_vals.iloc[0]
+                    if first_month_cash != 0:
+                        first_return_pct = (
+                            (first_month_value - first_month_cash)
+                            / first_month_cash * 100
+                        )
+                        synthetic_date = first_order_month.to_timestamp()
+                        synthetic_pct = pd.Series(
+                            [first_return_pct], index=[synthetic_date]
+                        )
+                        return_pct = pd.concat([synthetic_pct, return_pct])
 
-                    prev = month_start_vals.iloc[:-1]
-                    curr = month_start_vals.iloc[1:]
-                    prev_periods = prev.index.to_period("M")
-                    cash = pd.Series(
-                        [net_invest.get(p, 0.0) for p in prev_periods],
-                        index=prev.index,
+            if len(return_pct) == 0:
+                st.info("Not enough data for monthly returns.")
+            else:
+                # Pivot into year × month grid
+                returns = pd.DataFrame({
+                    "year": return_pct.index.year,
+                    "month": return_pct.index.month,
+                    "return_pct": return_pct.values,
+                })
+                pivot = returns.pivot(
+                    index="year", columns="month", values="return_pct",
+                )
+                pivot.columns = [MONTH_ABBR[m - 1] for m in pivot.columns]
+
+                # YTD return: same cash-flow-adjusted formula as monthly but
+                # aggregated by year.  Year-start = earliest day-1 value in
+                # each year.  Year-end = next year's start (or last available
+                # month-start for the current partial year).  Cash excludes
+                # orders on or before the year_start date — those purchases
+                # are already reflected in year_start via cumulative shares.
+                year_starts = month_start_vals.groupby(
+                    month_start_vals.index.year
+                ).first()
+
+                if len(year_starts) > 0:
+                    # Actual date of the first day-1 value per year
+                    year_start_dates = month_start_vals.reset_index() \
+                        .groupby(month_start_vals.index.year)["index"] \
+                        .first()
+                    year_prev = year_starts
+                    year_curr = year_starts.shift(-1)
+                    # Last (partial) year: use most recent month-start
+                    year_curr.iloc[-1] = month_start_vals.iloc[-1]
+                    last_ms_date = month_start_vals.index[-1]
+                    # Filter: exclude orders <= year_start_date (dup) and
+                    # orders beyond the last month-start
+                    s_orders = sel_orders.copy()
+                    s_orders["year_start"] = s_orders["date"].dt.year.map(
+                        year_start_dates
                     )
-                    adj_prev = prev + cash
-                    safe_adj = adj_prev.replace(0, float("nan"))
-                    return_pct = pd.Series(
-                        (curr.values - safe_adj.values) / safe_adj.values * 100,
-                        index=prev.index,
+                    yearly_sel = s_orders[
+                        (s_orders["date"] > s_orders["year_start"])
+                        & (s_orders["date"] <= last_ms_date)
+                    ]
+                    yearly_cash = yearly_sel.groupby(
+                        yearly_sel["date"].dt.year
+                    )["amount"].sum()
+
+                    year_cash = pd.Series(
+                        [yearly_cash.get(y, 0.0) for y in year_prev.index],
+                        index=year_prev.index,
+                        dtype=float,
+                    )
+                    year_adj_prev = year_prev.reset_index(drop=True) \
+                        + year_cash.reset_index(drop=True)
+                    year_safe_adj = year_adj_prev.replace(0, float("nan"))
+                    ytd = pd.Series(
+                        (year_curr.values - year_safe_adj.values)
+                        / year_safe_adj.values * 100,
+                        index=year_prev.index,
                     ).fillna(0.0)
                 else:
-                    return_pct = pd.Series(dtype=float)
+                    ytd = pd.Series(dtype=float)
 
-                # Add synthetic first-month return when the first order month
-                # has no month-start entry (portfolio started at zero).
-                if len(month_start_vals) > 0 and len(sel_orders) > 0:
-                    first_order_month = sel_orders["date"].min().to_period("M")
-                    first_ms_month = month_start_vals.index[0].to_period("M")
-                    if first_ms_month > first_order_month:
-                        # Starting value was zero; include ALL orders in the
-                        # first month (even those on the 1st).
-                        first_month_cash = sel_orders[
-                            sel_orders["month_key"] == first_order_month
-                        ]["amount"].sum()
-                        first_month_value = month_start_vals.iloc[0]
-                        if first_month_cash != 0:
-                            first_return_pct = (
-                                (first_month_value - first_month_cash)
-                                / first_month_cash * 100
-                            )
-                            synthetic_date = first_order_month.to_timestamp()
-                            synthetic_pct = pd.Series(
-                                [first_return_pct], index=[synthetic_date]
-                            )
-                            return_pct = pd.concat([synthetic_pct, return_pct])
+                pivot["Year Total"] = ytd.reindex(pivot.index)
 
-                if len(return_pct) == 0:
-                    st.info("Not enough data for monthly returns.")
-                else:
-                    # Pivot into year × month grid
-                    returns = pd.DataFrame({
-                        "year": return_pct.index.year,
-                        "month": return_pct.index.month,
-                        "return_pct": return_pct.values,
-                    })
-                    pivot = returns.pivot(
-                        index="year", columns="month", values="return_pct",
-                    )
-                    pivot.columns = [MONTH_ABBR[m - 1] for m in pivot.columns]
+                pivot = pivot.sort_index(ascending=False)
 
-                    # YTD return: same cash-flow-adjusted formula as monthly but
-                    # aggregated by year.  Year-start = earliest day-1 value in
-                    # each year.  Year-end = next year's start (or last available
-                    # month-start for the current partial year).  Cash excludes
-                    # orders on or before the year_start date — those purchases
-                    # are already reflected in year_start via cumulative shares.
-                    year_starts = month_start_vals.groupby(
-                        month_start_vals.index.year
-                    ).first()
-                    if len(year_starts) > 0:
-                        # Actual date of the first day-1 value per year
-                        year_start_dates = month_start_vals.reset_index() \
-                            .groupby(month_start_vals.index.year)["index"] \
-                            .first()
-                        year_prev = year_starts
-                        year_curr = year_starts.shift(-1)
-                        # Last (partial) year: use most recent month-start
-                        year_curr.iloc[-1] = month_start_vals.iloc[-1]
-                        last_ms_date = month_start_vals.index[-1]
-                        # Filter: exclude orders <= year_start_date (dup) and
-                        # orders beyond the last month-start
-                        s = sel_orders.copy()
-                        s["year_start"] = s["date"].dt.year.map(
-                            year_start_dates
-                        )
-                        yearly_sel = s[
-                            (s["date"] > s["year_start"])
-                            & (s["date"] <= last_ms_date)
-                        ]
-                        yearly_cash = yearly_sel.groupby(
-                            yearly_sel["date"].dt.year
-                        )["amount"].sum()
-                        year_cash = pd.Series(
-                            [yearly_cash.get(y, 0.0) for y in year_prev.index],
-                            index=year_prev.index,
-                            dtype=float,
-                        )
-                        year_adj_prev = year_prev.reset_index(drop=True) \
-                            + year_cash.reset_index(drop=True)
-                        year_safe_adj = year_adj_prev.replace(0, float("nan"))
-                        ytd = pd.Series(
-                            (year_curr.values - year_safe_adj.values)
-                            / year_safe_adj.values * 100,
-                            index=year_prev.index,
-                        ).fillna(0.0)
-                    else:
-                        ytd = pd.Series(dtype=float)
+                # Format cells as percentage strings for display
+                display = pivot.map(
+                    lambda x: format_pct(x) if pd.notna(x) else ""
+                )
+                display.index = display.index.astype(str)
+                display.index.name = None
 
-                    pivot["Year Total"] = ytd.reindex(pivot.index)
+                styled = display.style.map(_color_cell) \
+                    .set_properties(**{"text-align": "center"}) \
+                    .set_table_styles([
+                        {
+                            "selector": "th, tr",
+                            "props": [
+                                ("font-weight", "normal"), ("border", "none"),
+                            ],
+                        },
+                        {
+                            "selector": "td",
+                            "props": [
+                                ("border-width", "1px 0 1px 0"),
+                                ("border-color", "#BBBBBB"),
+                            ],
+                        },
+                        {
+                            "selector": "th:last-child",
+                            "props": [("font-weight", "550")],
+                        },
+                        {
+                            "selector": "td:last-child",
+                            "props": [
+                                ("background-color", "#F7F7F7"),
+                                ("font-weight", "550"),
+                            ],
+                        },
+                    ])
 
-                    pivot = pivot.sort_index(ascending=False)
-
-                    # Format cells as percentage strings for display
-                    display = pivot.map(
-                        lambda x: format_pct(x) if pd.notna(x) else ""
-                    )
-                    display.index = display.index.astype(str)
-                    display.index.name = None
-
-                    styled = display.style.map(_color_cell) \
-                        .set_properties(**{"text-align": "center"}) \
-                        .set_table_styles([
-                            {
-                                "selector": "th, tr",
-                                "props": [
-                                    ("font-weight", "normal"), ("border", "none"),
-                                ],
-                            },
-                            {
-                                "selector": "td",
-                                "props": [
-                                    ("border-width", "1px 0 1px 0"),
-                                    ("border-color", "#BBBBBB"),
-                                ],
-                            },
-                            {
-                                "selector": "th:last-child",
-                                "props": [("font-weight", "550")],
-                            },
-                            {
-                                "selector": "td:last-child",
-                                "props": [
-                                    ("background-color", "#F7F7F7"),
-                                    ("font-weight", "550"),
-                                ],
-                            },
-                        ])
-
-                    st.markdown(styled.to_html(), unsafe_allow_html=True)
+                st.markdown(styled.to_html(), unsafe_allow_html=True)
         else:
             st.info("Select at least one asset.")
 
