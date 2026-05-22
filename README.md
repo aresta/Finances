@@ -35,18 +35,7 @@ On first run, default `finances.conf` and `orders.csv` templates are created in 
 
 ## Configuration
 
-`finances.conf` (TOML) specifies the orders file, CSV column mapping, date format, and cache settings. See the bundled defaults or `finances.conf` for examples.
-
-In the repo there are two config files for **Indexa** and **MyInvestor**:
-
-- finances_indexa.conf
-- finances_myinvestor.conf
-
-They should work out of the box (*almost*) with the cvs exported from their respectives web sites.  
-
-*Note*: **MyInvestor** (dirty) cvs file needs two adjustments:
-- For some obscure reason they decided to use different decimal separators in each column: '**.**' and '**,**' So harmonize it.
-- They also forgot to mention in file if the operations  are 'buy' or 'sell'. So, check which ones are 'sell' and switch them to negative. Or add a proper column with: buy / refund
+`finances.conf` specifies the orders file, CSV column mapping, date format, and cache settings. See the bundled defaults or `finances.conf` for examples.
 
 
 ### Config example
@@ -70,9 +59,15 @@ subsc   = 4     # Subscription / refund (optional)
 date_format = "%d/%m/%Y"
 delimiter = ","
 decimal_separator = "."
+
+[cache]
+price = ".price_cache.json"
+price_ttl_hours = 12
+historical = ".historical_cache.csv"
+historical_max_age_days = 14
 ```
 
-### Orders example
+### Orders CSV example
 
 ```csv
 Date,ISIN,Total Cost,Num Shares,Subsc
@@ -86,6 +81,19 @@ Date,ISIN,Total Cost,Num Shares,Subsc
 03/03/2025,IE00BFPM9P35,209.78,0.879,refund
 03/03/2025,IE0007471471,300,3.365,Subscription
 ```
+
+
+### Example config for Indexa and MyInvestor
+In the repo there are two config files for **Indexa** and **MyInvestor**:
+
+- finances_indexa.conf
+- finances_myinvestor.conf
+
+They should work out of the box (*almost*) with the cvs exported from their respectives web sites.  
+
+*Note*: **MyInvestor** (dirty) cvs file needs two adjustments:
+- For some obscure reason they decided to use different decimal separators in each column: '**.**' and '**,**' So harmonize them.
+- They also forgot to mention in file if the operations  are 'buy' or 'sell'. So, check which ones are 'sell' and switch them to negative. Or add a proper column with: buy / refund
 
 
 
