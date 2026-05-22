@@ -14,4 +14,6 @@ agents.md
 *.conf
 !src/defaults/orders.csv
 !src/defaults/finances.conf
+!finances_indexa.conf
+!finances_myinvestor.conf
 **test**

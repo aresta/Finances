@@ -235,9 +235,6 @@ def render() -> None:
         if f"sel_{isin}" not in st.session_state:
             st.session_state[f"sel_{isin}"] = False
 
-    if "metric" not in st.session_state:
-        st.session_state.metric = METRIC_VALUE
-
     # ---- Build unified date index ----
     all_dates = pd.DatetimeIndex(
         sorted(set().union(*[s.index for s in hist_prices.values()]))
@@ -358,43 +355,12 @@ def render() -> None:
         if i in portfolio.index and not portfolio.at[i, "closed"]
     ]
 
-    # ---- Reconcile metric across tab-specific radio buttons ----
-    # Syncs a shared metric value so that changing the radio in one tab
-    # updates the other tab's radio too.  P&L % is only available in the
-    # Assets tab; the Allocation tab radio only offers Value / P&L, so
-    # P&L % is mapped to P&L for the allocation key.
-    _METRIC_KEYS = ["metric_assets", "metric_allocation"]
-    metric = st.session_state.get("metric", METRIC_VALUE)
-    for key in _METRIC_KEYS:
-        val = st.session_state.get(key, METRIC_VALUE)
-        if val != metric:
-            metric = val
-            break
-
-    st.session_state.metric = metric
-    for key in _METRIC_KEYS:
-        # Allocation tab radio does not include P&L %; map it to P&L
-        st.session_state[key] = METRIC_PNL if metric == METRIC_PNL_PCT and key == "metric_allocation" else metric
-
-    def _compute_metric_values(isin: str) -> pd.Series:
-        """Return the filtered value, P&L, or P&L % series for *isin*."""
-        if st.session_state.metric == METRIC_VALUE:
-            return hist_filtered[isin]
-        if st.session_state.metric == METRIC_PNL:
-            return hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
-        # P&L %: total P&L / money_paid × 100
-        total_pnl = hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
-        money_paid = portfolio.at[isin, "money_paid"]
-        if money_paid and money_paid != 0:
-            return total_pnl / money_paid * 100
-        return pd.Series(float("nan"), index=total_pnl.index)
-
     # ---- Tabs ----
     tab_names = ["Overview", "Assets", "Allocation", "By Type",
                  "Monthly Returns"]
     tabs = st.tabs(tab_names)
 
-    # ===== TAB 0: Overview =====
+    # ===== TAB 1: Overview =====
     with tabs[0]:
         if selected_isins:
             # Summary metrics (active positions only)
@@ -597,25 +563,38 @@ def render() -> None:
                 ])
             st.markdown(styled_closed.to_html(), unsafe_allow_html=True)
 
-    # ===== TAB 1: Assets — single-asset line chart =====
+    # ===== TAB 2: Assets — single-asset line chart =====
     with tabs[1]:
+        metric_assets = st.session_state.get("metric_assets", METRIC_VALUE)
         ylabel = {
             METRIC_VALUE: "Value (\u20ac)", METRIC_PNL: "P&L (\u20ac)", METRIC_PNL_PCT: "P&L (%)",
-        }[metric]
+        }[metric_assets]
         show_total = st.session_state.get("show_total_assets", False)
 
         fig = go.Figure()
         for isin in sel_hist_isins:
+            if metric_assets == METRIC_VALUE:
+                metric_vals = hist_filtered[isin]
+            elif metric_assets == METRIC_PNL:
+                metric_vals = hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
+            else:  # METRIC_PNL_PCT
+                total_pnl = hist_filtered[isin] - cost_filtered[isin] + realized_filtered[isin]
+                money_paid = portfolio.at[isin, "money_paid"]
+                if money_paid and money_paid != 0:
+                    metric_vals = total_pnl / money_paid * 100
+                else:
+                    metric_vals = pd.Series(float("nan"), index=total_pnl.index)
+
             fig.add_trace(go.Scatter(
-                x=hist_filtered.index, y=_compute_metric_values(isin),
+                x=hist_filtered.index, y=metric_vals,
                 mode="lines", name=portfolio.at[isin, "name"] if isin in portfolio.index else isin,
                 hovertemplate="%{y:,.2f}",
             ))
         # Overlay a total line (dashed black) if requested
         if sel_hist_isins and show_total:
-            if metric == METRIC_VALUE:
+            if metric_assets == METRIC_VALUE:
                 total_vals = hist_filtered[sel_hist_isins].sum(axis=1)
-            elif metric == METRIC_PNL:
+            elif metric_assets == METRIC_PNL:
                 total_vals = (
                     hist_filtered[sel_hist_isins].sum(axis=1)
                     - cost_filtered[sel_hist_isins].sum(axis=1)
@@ -640,17 +619,18 @@ def render() -> None:
         fig.update_layout(
             yaxis_title=ylabel, margin=dict(l=0, r=0, t=10, b=0), height=400,
         )
-        if st.session_state.metric == METRIC_PNL_PCT:
+        if metric_assets == METRIC_PNL_PCT:
             fig.update_layout(yaxis=dict(autorange=True))
-        st.plotly_chart(fig, width="stretch", key=f"assets_chart_{metric}")
 
+        st.plotly_chart(fig, width="stretch", key=f"assets_chart_{metric_assets}")
         st.radio("Metric", [METRIC_VALUE, METRIC_PNL, METRIC_PNL_PCT], key="metric_assets")
         st.checkbox("Show Total", value=False, key="show_total_assets")
 
-    # ===== TAB 2: Allocation — stacked area =====
+    # ===== TAB 3: Allocation — stacked area =====
     with tabs[2]:
+        metric_allocation = st.session_state.get("metric_allocation", METRIC_VALUE)
         if sel_hist_isins:
-            if metric in (METRIC_PNL, METRIC_PNL_PCT):
+            if metric_allocation == METRIC_PNL:
                 alloc_df = (
                     hist_filtered[sel_hist_isins] - cost_filtered[sel_hist_isins]
                     + realized_filtered[sel_hist_isins]
@@ -677,13 +657,13 @@ def render() -> None:
                     hovertemplate="%{y:,.2f}",
                 ))
             fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
-            st.plotly_chart(fig, width="stretch", key=f"alloc_chart_{metric}")
+            st.plotly_chart(fig, width="stretch", key=f"alloc_chart_{metric_allocation}")
             st.radio("Metric", [METRIC_VALUE, METRIC_PNL], key="metric_allocation")
             st.checkbox("Invested", value=False, key="show_invested_allocation")
         else:
             st.info("Select at least one asset.")
 
-    # ===== TAB 3: By Type — stacked area grouped by Stock/Bond/Other =====
+    # ===== TAB 4: By Type — stacked area grouped by Stock/Bond/Other =====
     with tabs[3]:
         if selected_isins:
             # Group selected ISINs by asset type
@@ -713,7 +693,7 @@ def render() -> None:
         else:
             st.info("Select at least one asset.")
 
-    # ===== TAB 4: Monthly Returns — year × month heatmap-style grid =====
+    # ===== TAB 5: Monthly Returns — year × month heatmap-style grid =====
     with tabs[4]:
         if sel_hist_isins:
             # Total portfolio value at all dates; trim leading zeros
