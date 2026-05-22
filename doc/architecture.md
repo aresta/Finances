@@ -226,7 +226,8 @@ Python ≥ 3.11 required (for stdlib `tomllib`).
 - source venv/bin/activate
 
 ### Install
-- pip install ..../Finances/dist/finances-0.5.0-py3-none-any.whl
+- pip install https://github.com/aresta/Finances/raw/main/dist/finances-0.5.0-py3-none-any.whl
+
 
 ### Uninstall
 - pip uninstall finances
